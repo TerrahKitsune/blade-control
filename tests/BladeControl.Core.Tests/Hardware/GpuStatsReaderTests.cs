@@ -1,5 +1,6 @@
 using BladeControl.Core.Hardware;
 using BladeControl.Core.Models;
+using BladeControl.Core.Platform;
 
 namespace BladeControl.Core.Tests.Hardware;
 
@@ -28,4 +29,12 @@ public class GpuStatsReaderTests
     [Fact]
     public void AnotherApp_WithNoVideoMemory_DoesNotCount() =>
         Assert.False(GpuStatsReader.SomeoneElseUses([new(3744, 0)], ThisApp));
+
+    [Fact]
+    public void ThePciLocation_IsWrittenAsNvidiasLibraryTakesIt() =>
+        Assert.Equal("c4:00.0", GpuStatsReader.NvmlPciBusId(new PciLocation(196, 0, 0)));
+
+    [Fact]
+    public void ThePciLocation_IsWrittenInHexadecimal() =>
+        Assert.Equal("0a:1f.7", GpuStatsReader.NvmlPciBusId(new PciLocation(10, 31, 7)));
 }

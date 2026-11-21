@@ -2,26 +2,40 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using BladeControl.Core.Diagnostics;
 
 namespace BladeControl.Core.Platform;
 
+/// <summary>Where a device sits on the PCI bus, as Windows reports it.</summary>
+internal sealed record PciLocation(uint Bus, uint Device, uint Function);
+
 /// <summary>
 /// The dedicated GPU as Device Manager lists it: its device instance id, its
 /// name, whether it is turned on and, when Windows says, whether it is awake
-/// (in D0) rather than asleep in a low power state.
+/// (in D0) rather than asleep in a low power state. Its PCI ids and location
+/// let the other readers find the same card; each is null when Windows does
+/// not give it.
 /// </summary>
-internal sealed record DedicatedGpu(string InstanceId, string Name, bool Enabled, bool? Awake = null);
+internal sealed record DedicatedGpu(
+    string InstanceId,
+    string Name,
+    bool Enabled,
+    bool? Awake = null,
+    uint? VendorId = null,
+    uint? DeviceId = null,
+    PciLocation? Location = null);
 
 /// <summary>
-/// The NVIDIA card as a device: found and read through Windows' device setup
-/// API (no rights needed), and turned off or on as Device Manager's Disable
-/// and Enable do, through Windows' own pnputil (administrator rights, so only
-/// from the elevated command). Turned off, it stays off across restarts until
-/// turned on again; the integrated GPU, which drives the laptop's own screen,
-/// is never touched.
+/// The laptop's own NVIDIA card as a device: found and read through Windows'
+/// device setup API (no rights needed), and turned off or on as Device
+/// Manager's Disable and Enable do, through Windows' own pnputil
+/// (administrator rights, so only from the elevated command). Turned off, it
+/// stays off across restarts until turned on again; the integrated GPU, which
+/// drives the laptop's own screen, and an external card (an eGPU) are never
+/// touched.
 /// </summary>
-internal static class DedicatedGpuDevice
+internal static partial class DedicatedGpuDevice
 {
     private const string NvidiaVendor = "VEN_10DE";
     private const int DigcfPresent = 0x2;
@@ -34,7 +48,14 @@ internal static class DedicatedGpuDevice
     // Windows' "display adapters" device class.
     private static readonly Guid DisplayClass = new("4d36e968-e325-11ce-bfc1-08002be10318");
 
-    /// <summary>The NVIDIA display adapter, or null when there is none (or Windows will not say).</summary>
+    // Instance ids look like "PCI\VEN_10DE&DEV_2C58&SUBSYS_...".
+    [GeneratedRegex(@"VEN_([0-9A-F]{4})&DEV_([0-9A-F]{4})", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PciIdsPattern();
+
+    /// <summary>
+    /// The laptop's own NVIDIA display adapter, or null when there is none (or
+    /// Windows will not say). An external card is never it.
+    /// </summary>
     public static DedicatedGpu? Find()
     {
         var classGuid = DisplayClass;
@@ -48,28 +69,68 @@ internal static class DedicatedGpuDevice
 
         try
         {
+            var devices = new List<(SpDevinfoData Info, string InstanceId, bool? External)>();
             var info = new SpDevinfoData { CbSize = Marshal.SizeOf<SpDevinfoData>() };
 
             for (var index = 0; SetupDiEnumDeviceInfo(set, index, ref info); index++)
             {
-                var id = InstanceId(set, ref info);
-
-                if (id is null || !id.Contains(NvidiaVendor, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var name = Property(set, ref info, SpdrpFriendlyName) ?? Property(set, ref info, SpdrpDeviceDesc) ?? "NVIDIA";
-                var disabled = CM_Get_DevNode_Status(out var status, out var problem, info.DevInst, 0) == CrSuccess
-                    && (status & DnHasProblem) != 0 && problem == CmProbDisabled;
-
-                return new DedicatedGpu(id, name, Enabled: !disabled, Awake: disabled ? false : IsAwake(info.DevInst));
+                if (InstanceId(set, ref info) is { } instanceId)
+                    devices.Add((info, instanceId, IsExternal(info.DevInst)));
             }
 
-            return null;
+            var chosen = IndexOfDedicatedGpu(devices.Select(device => (device.InstanceId, device.External)).ToList());
+
+            if (chosen < 0)
+                return null;
+
+            var (device, id, _) = devices[chosen];
+            var name = Property(set, ref device, SpdrpFriendlyName) ?? Property(set, ref device, SpdrpDeviceDesc) ?? "NVIDIA";
+            var disabled = CM_Get_DevNode_Status(out var status, out var problem, device.DevInst, 0) == CrSuccess
+                && (status & DnHasProblem) != 0 && problem == CmProbDisabled;
+            var (vendorId, deviceId) = ReadPciIds(id);
+
+            return new DedicatedGpu(
+                id,
+                name,
+                Enabled: !disabled,
+                Awake: disabled ? false : IsAwake(device.DevInst),
+                vendorId,
+                deviceId,
+                ReadPciLocation(device.DevInst));
         }
         finally
         {
             SetupDiDestroyDeviceInfoList(set);
         }
+    }
+
+    /// <summary>
+    /// Which of the display devices is the dedicated GPU: the first NVIDIA one
+    /// that Windows does not report as external. One whose place Windows will
+    /// not say counts as the machine's own. -1 when there is none.
+    /// </summary>
+    internal static int IndexOfDedicatedGpu(IReadOnlyList<(string InstanceId, bool? External)> devices)
+    {
+        for (var index = 0; index < devices.Count; index++)
+        {
+            var (instanceId, external) = devices[index];
+
+            if (instanceId.Contains(NvidiaVendor, StringComparison.OrdinalIgnoreCase) && external != true)
+                return index;
+        }
+
+        return -1;
+    }
+
+    /// <summary>The PCI vendor and device ids in a device instance id, each null when it has none.</summary>
+    internal static (uint? VendorId, uint? DeviceId) ReadPciIds(string instanceId)
+    {
+        var match = PciIdsPattern().Match(instanceId);
+
+        if (!match.Success)
+            return (null, null);
+
+        return (Convert.ToUInt32(match.Groups[1].Value, 16), Convert.ToUInt32(match.Groups[2].Value, 16));
     }
 
     /// <summary>
@@ -131,6 +192,61 @@ internal static class DedicatedGpuDevice
 
     // DEVPKEY_Device_PowerData.
     private static readonly DevPropKey PowerDataKey = new() { FormatId = new("a45c254e-df1c-4efd-8020-67d146a850e0"), PropertyId = 32 };
+
+    /// <summary>
+    /// Whether the device is outside the machine (an eGPU in its enclosure):
+    /// Windows places every device that is part of the laptop in the machine's
+    /// own container. Null when Windows will not say.
+    /// </summary>
+    private static bool? IsExternal(uint devInst)
+    {
+        var key = InLocalMachineContainerKey;
+        var buffer = new byte[4];
+        var size = (uint)buffer.Length;
+
+        if (CM_Get_DevNode_Property(devInst, ref key, out var type, buffer, ref size, 0) != CrSuccess ||
+            type != DevpropTypeBoolean || size < 1)
+        {
+            return null;
+        }
+
+        return buffer[0] == 0;
+    }
+
+    private const uint DevpropTypeBoolean = 0x11;
+
+    // DEVPKEY_Device_InLocalMachineContainer.
+    private static readonly DevPropKey InLocalMachineContainerKey = new() { FormatId = new("8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c"), PropertyId = 4 };
+
+    /// <summary>Where the device sits on the PCI bus, or null when Windows will not say.</summary>
+    private static PciLocation? ReadPciLocation(uint devInst)
+    {
+        if (ReadUInt32(devInst, BusNumberKey) is not { } bus || ReadUInt32(devInst, AddressKey) is not { } address)
+            return null;
+
+        // On PCI, the address holds the device number in its high word and the function in its low word.
+        return new PciLocation(bus, address >> 16, address & 0xFFFF);
+    }
+
+    private static uint? ReadUInt32(uint devInst, DevPropKey key)
+    {
+        var buffer = new byte[4];
+        var size = (uint)buffer.Length;
+
+        if (CM_Get_DevNode_Property(devInst, ref key, out var type, buffer, ref size, 0) != CrSuccess ||
+            type != DevpropTypeUInt32 || size < 4)
+        {
+            return null;
+        }
+
+        return BitConverter.ToUInt32(buffer, 0);
+    }
+
+    private const uint DevpropTypeUInt32 = 0x7;
+
+    // DEVPKEY_Device_BusNumber and DEVPKEY_Device_Address.
+    private static readonly DevPropKey BusNumberKey = new() { FormatId = new("a45c254e-df1c-4efd-8020-67d146a850e0"), PropertyId = 23 };
+    private static readonly DevPropKey AddressKey = new() { FormatId = new("a45c254e-df1c-4efd-8020-67d146a850e0"), PropertyId = 30 };
 
     private static string? InstanceId(IntPtr set, ref SpDevinfoData info)
     {

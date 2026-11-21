@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using BladeControl.Core.Diagnostics;
 using BladeControl.Core.Models;
+using BladeControl.Core.Platform;
 
 namespace BladeControl.Core.Hardware;
 
@@ -30,8 +31,13 @@ internal sealed class GpuStatsReader : IDisposable
     private static readonly TimeSpan UsersCheckEvery = TimeSpan.FromSeconds(3);
     private const int SystemProcessId = 4;
 
+    // Without a GPU to read, it is looked for again every few seconds, not every read.
+    private static readonly TimeSpan AdapterLookupEvery = TimeSpan.FromSeconds(3);
+
     private readonly NvidiaDriverLibrary _nvidia = new();
     private long? _adapterLuid;
+    private DateTime _adapterLookedUpAt;
+    private string? _nvidiaBusId;
     private bool _loggedFailure;
     private DateTime _usersCheckedAt;
     private bool _othersUseIt;
@@ -40,7 +46,13 @@ internal sealed class GpuStatsReader : IDisposable
     {
         try
         {
-            _adapterLuid ??= DiscreteGpuReader.ReadDiscreteAdapters().FirstOrDefault()?.Luid;
+            if (_adapterLuid is null && DateTime.UtcNow - _adapterLookedUpAt >= AdapterLookupEvery)
+            {
+                _adapterLookedUpAt = DateTime.UtcNow;
+                var gpu = DedicatedGpuDevice.Find();
+                _adapterLuid = DiscreteGpuReader.ReadDedicatedGpuAdapters(gpu).FirstOrDefault()?.Luid;
+                _nvidiaBusId = gpu?.Location is { } location ? NvmlPciBusId(location) : null;
+            }
 
             if (_adapterLuid is not { } luid)
                 return GpuStats.None;
@@ -71,7 +83,7 @@ internal sealed class GpuStatsReader : IDisposable
                 return new GpuStats(Asleep: false, celsius, 0, null, memoryMhz);
             }
 
-            var (coreMhz, usage) = _nvidia.Read();
+            var (coreMhz, usage) = _nvidia.Read(_nvidiaBusId);
             return new GpuStats(Asleep: false, celsius, usage, coreMhz, memoryMhz);
         }
         catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException or InvalidOperationException)
@@ -108,6 +120,10 @@ internal sealed class GpuStatsReader : IDisposable
     internal static bool SomeoneElseUses(IEnumerable<GpuProcessUsage> usage, int thisProcessId) =>
         usage.Any(process => process.ProcessId != thisProcessId && process.ProcessId != SystemProcessId && process.DedicatedBytes > 0);
 
+    /// <summary>The PCI location as NVIDIA's library takes it: bus:device.function, in hexadecimal.</summary>
+    internal static string NvmlPciBusId(PciLocation location) =>
+        $"{location.Bus:x2}:{location.Device:x2}.{location.Function:x}";
+
     /// <summary>
     /// NVIDIA's management library (nvml.dll), installed with the driver. On a
     /// laptop without it, or with another vendor's GPU, every figure is null.
@@ -121,7 +137,8 @@ internal sealed class GpuStatsReader : IDisposable
         private bool _initialized;
         private bool _unavailable;
 
-        public (int? CoreMhz, double? UsagePercent) Read()
+        /// <param name="pciBusId">Where the dedicated GPU is, or null when not known; then the first NVIDIA GPU is read.</param>
+        public (int? CoreMhz, double? UsagePercent) Read(string? pciBusId)
         {
             if (_unavailable)
                 return (null, null);
@@ -138,8 +155,11 @@ internal sealed class GpuStatsReader : IDisposable
 
                     _initialized = true;
 
-                    // Only NVIDIA GPUs are listed, so the first is the dedicated one.
-                    if (nvmlDeviceGetHandleByIndex_v2(0, out _device) != Success)
+                    // The library numbers an eGPU too, and may put it first, so ask by
+                    // location; without one, the first is the only NVIDIA GPU there usually is.
+                    var found = pciBusId is not null && nvmlDeviceGetHandleByPciBusId_v2(pciBusId, out _device) == Success;
+
+                    if (!found && nvmlDeviceGetHandleByIndex_v2(0, out _device) != Success)
                     {
                         _unavailable = true;
                         Dispose();
@@ -182,6 +202,9 @@ internal sealed class GpuStatsReader : IDisposable
 
         [DllImport("nvml.dll")]
         private static extern int nvmlDeviceGetHandleByIndex_v2(uint index, out IntPtr device);
+
+        [DllImport("nvml.dll", CharSet = CharSet.Ansi)]
+        private static extern int nvmlDeviceGetHandleByPciBusId_v2(string pciBusId, out IntPtr device);
 
         [DllImport("nvml.dll")]
         private static extern int nvmlDeviceGetClockInfo(IntPtr device, int type, out uint clockMhz);

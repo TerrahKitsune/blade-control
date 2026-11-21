@@ -483,7 +483,7 @@ internal sealed partial class DisplayViewModel : ObservableObject, IDisposable
             var (gpu, scan) = await Task.Run(() =>
             {
                 var found = DedicatedGpuDevice.Find();
-                return (found, found is { Enabled: true } ? DgpuScanner.Scan(neverClose) : null);
+                return (found, found is { Enabled: true } ? DgpuScanner.Scan(neverClose, found) : null);
             });
 
             ShowGpuActivity = gpu is { Enabled: true } && scan is { GpuFound: true };

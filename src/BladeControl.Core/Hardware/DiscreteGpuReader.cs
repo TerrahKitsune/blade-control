@@ -3,11 +3,12 @@ using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using BladeControl.Core.Diagnostics;
 using BladeControl.Core.Models;
+using BladeControl.Core.Platform;
 
 namespace BladeControl.Core.Hardware;
 
 /// <summary>A graphics adapter Windows knows about, identified by its LUID (the id its performance counters use).</summary>
-internal sealed record GpuAdapter(string Description, uint VendorId, long Luid, long DedicatedBytes)
+internal sealed record GpuAdapter(string Description, uint VendorId, long Luid, long DedicatedBytes, uint DeviceId = 0)
 {
     private const uint MicrosoftBasicRenderVendorId = 0x1414;
     private const long MinimumDedicatedBytes = 512L * 1024 * 1024;
@@ -53,8 +54,9 @@ internal static partial class DiscreteGpuReader
                     continue;
                 }
 
-                var vendor = key.GetValue("VendorId") is int id ? unchecked((uint)id) : 0u;
-                var adapter = new GpuAdapter(description, vendor, luid, dedicated);
+                var vendor = key.GetValue("VendorId") is int vendorId ? unchecked((uint)vendorId) : 0u;
+                var device = key.GetValue("DeviceId") is int deviceId ? unchecked((uint)deviceId) : 0u;
+                var adapter = new GpuAdapter(description, vendor, luid, dedicated, device);
 
                 if (adapter.IsDiscrete)
                     adapters.Add(adapter);
@@ -66,6 +68,32 @@ internal static partial class DiscreteGpuReader
         }
 
         return adapters;
+    }
+
+    /// <summary>
+    /// The discrete adapters that are the dedicated GPU, the laptop's own card,
+    /// leaving out an external one (an eGPU).
+    /// </summary>
+    public static IReadOnlyList<GpuAdapter> ReadDedicatedGpuAdapters() =>
+        ReadDedicatedGpuAdapters(DedicatedGpuDevice.Find());
+
+    /// <inheritdoc cref="ReadDedicatedGpuAdapters()"/>
+    public static IReadOnlyList<GpuAdapter> ReadDedicatedGpuAdapters(DedicatedGpu? gpu) =>
+        MatchDedicatedGpu(ReadDiscreteAdapters(), gpu);
+
+    /// <summary>
+    /// The adapters with the dedicated GPU's vendor and device ids, none when
+    /// no adapter has them (the card is off, or only an eGPU is listed). When
+    /// the card or its ids are not known, or the adapters carry no device id,
+    /// all of them. An internal and an external card of the very same model
+    /// look alike here, so both are kept.
+    /// </summary>
+    internal static IReadOnlyList<GpuAdapter> MatchDedicatedGpu(IReadOnlyList<GpuAdapter> adapters, DedicatedGpu? gpu)
+    {
+        if (gpu is not { VendorId: { } vendorId, DeviceId: { } deviceId } || adapters.All(adapter => adapter.DeviceId == 0))
+            return adapters;
+
+        return adapters.Where(adapter => adapter.VendorId == vendorId && adapter.DeviceId == deviceId).ToList();
     }
 
     /// <summary>Video memory each process holds on the given adapters, in bytes, summed per process.</summary>

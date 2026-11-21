@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using BladeControl.Core.Hardware;
 using BladeControl.Core.Models;
+using BladeControl.Core.Platform;
 
 namespace BladeControl.Core.Services;
 
@@ -30,9 +31,17 @@ internal static class DgpuScanner
     public static Task<DgpuScanResult> ScanAsync(IReadOnlyCollection<string>? neverClose = null) =>
         Task.Run(() => Scan(neverClose));
 
-    internal static DgpuScanResult Scan(IReadOnlyCollection<string>? neverClose = null)
+    /// <inheritdoc cref="Scan(IReadOnlyCollection{string}?, DedicatedGpu?)"/>
+    public static Task<DgpuScanResult> ScanAsync(IReadOnlyCollection<string>? neverClose, DedicatedGpu? gpu) =>
+        Task.Run(() => Scan(neverClose, gpu));
+
+    internal static DgpuScanResult Scan(IReadOnlyCollection<string>? neverClose = null) =>
+        Scan(neverClose, DedicatedGpuDevice.Find());
+
+    /// <summary>Scans the dedicated GPU the caller already found, so both describe the same card.</summary>
+    internal static DgpuScanResult Scan(IReadOnlyCollection<string>? neverClose, DedicatedGpu? gpu)
     {
-        var adapters = DiscreteGpuReader.ReadDiscreteAdapters();
+        var adapters = DiscreteGpuReader.ReadDedicatedGpuAdapters(gpu);
         var externalDisplay = DisplayTopology.HasExternalDisplay();
 
         if (adapters.Count == 0)

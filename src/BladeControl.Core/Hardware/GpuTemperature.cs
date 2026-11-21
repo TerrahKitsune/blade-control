@@ -21,14 +21,22 @@ internal sealed class D3dkmtGpuTemperature : IGpuTemperatureSource
     // KMTQAITYPE_ADAPTERPERFDATA in Windows' d3dkmthk.h.
     private const int AdapterPerfDataQuery = 62;
 
+    // Without a GPU to read, it is looked for again every few seconds, not every read.
+    private static readonly TimeSpan AdapterLookupEvery = TimeSpan.FromSeconds(3);
+
     private long? _adapterLuid;
+    private DateTime _adapterLookedUpAt;
     private bool _loggedFailure;
 
     public double? ReadCelsius()
     {
         try
         {
-            _adapterLuid ??= DiscreteGpuReader.ReadDiscreteAdapters().FirstOrDefault()?.Luid;
+            if (_adapterLuid is null && DateTime.UtcNow - _adapterLookedUpAt >= AdapterLookupEvery)
+            {
+                _adapterLookedUpAt = DateTime.UtcNow;
+                _adapterLuid = DiscreteGpuReader.ReadDedicatedGpuAdapters().FirstOrDefault()?.Luid;
+            }
 
             if (_adapterLuid is not { } luid)
                 return null;
