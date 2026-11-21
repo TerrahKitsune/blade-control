@@ -27,6 +27,7 @@ public partial class App : Application
     private GlobalShortcuts? _shortcuts;
     private EventWaitHandle? _showWindow;
     private RegisteredWaitHandle? _showWindowWait;
+    private CliPipeServer? _commandLine;
     private bool _quitting;
 
     // While the window is closed to the tray, what little the app touches is moved out of RAM now and then.
@@ -42,6 +43,14 @@ public partial class App : Application
         if (RunElevatedCommand(e.Args) is int exitCode)
         {
             Shutdown(exitCode);
+            return;
+        }
+
+        // The command line (--status, --set-mode, --set-charge-limit) never opens
+        // the laptop itself: it asks the running app, prints the answer and exits.
+        if (RunCommandLine(e.Args) is int commandLineExitCode)
+        {
+            Shutdown(commandLineExitCode);
             return;
         }
 
@@ -198,6 +207,10 @@ public partial class App : Application
         _showWindowWait = ThreadPool.RegisterWaitForSingleObject(_showWindow, (_, _) => Dispatcher.BeginInvoke(ShowMainWindow), null, Timeout.Infinite, executeOnlyOnce: false);
 
         _trimTimer.Tick += (_, _) => BackgroundMemory.Trim();
+
+        _commandLine = new CliPipeServer(CliPipeServer.PipeNameForThisSession,
+            request => Dispatcher.InvokeAsync(() => AnswerCommandLineAsync(request)).Task.Unwrap());
+        _commandLine.Start();
 
         StartShortcuts();
     }
@@ -498,6 +511,65 @@ public partial class App : Application
         ?? WindowsCachesCommand.TryRun(args, WindowsCaches.CleanElevated)
         ?? DedicatedGpuCommand.TryRun(args, () => DedicatedGpuDevice.Find()?.InstanceId, DedicatedGpuDevice.SetEnabled);
 
+    private static int? RunCommandLine(string[] args)
+    {
+        using var output = new System.IO.StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        return CliCommand.TryRun(args, new CliPipeClient(CliPipeServer.PipeNameForThisSession, StartInTray), output);
+    }
+
+    // Started through the shell, so the new copy does not inherit the command line's
+    // output: a caller reading it to the end would otherwise wait for the app to exit.
+    // An app still starting holds the lock but is not listening yet; a second copy
+    // would only bring its window up, so then the command line just waits for it.
+    private static void StartInTray()
+    {
+        if (Mutex.TryOpenExisting(SingleInstanceMutexName, out var running))
+        {
+            running.Dispose();
+            return;
+        }
+
+        var executable = Environment.ProcessPath ?? throw new InvalidOperationException("The app's own path is unknown.");
+
+        _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(executable, RunKeyStartupRegistration.TrayArgument)
+        {
+            UseShellExecute = true
+        });
+    }
+
+    // A command-line request, on the UI thread, through the same paths as the
+    // page, the tray menu and the mode shortcuts, but without their notice.
+    private async Task<CliReply> AnswerCommandLineAsync(CliRequest request)
+    {
+        var performance = _viewModel!.Performance;
+
+        switch (request)
+        {
+            case { Action: CliAction.SetMode, Mode: { } mode }:
+            {
+                var (applied, status) = await performance.SelectFromCommandLineAsync(mode);
+                AppLog.Info($"Command line set mode {mode}: {status}");
+                return new CliMessage(applied, status);
+            }
+
+            case { Action: CliAction.SetChargeLimit, ChargeLimit: { } limit }:
+            {
+                var (applied, status) = await performance.SetChargeLimitAsync(limit);
+                AppLog.Info($"Command line set charge limit {limit}: {status}");
+                return new CliMessage(applied, status);
+            }
+
+            default:
+            {
+                var state = await performance.ReadCurrentStateAsync();
+                var fans = _services!.Model?.HasFanSpeeds == true ? await _services.FanTelemetry.ReadAsync() : null;
+
+                return new CliStatus(_services.Model?.Name, performance.IsPluggedIn, state.Mode, state.Cpu, state.Gpu, state.MaxFan,
+                    fans is null ? null : new CliFanRpm(fans.CpuFanRpm, fans.GpuFanRpm), _services.Settings.BatteryChargeLimit);
+            }
+        }
+    }
+
     private static async void ScreenshotThenClose(MainWindow window, string path, PerformanceViewModel? previewCustom, bool scrolled)
     {
         await Task.Delay(TimeSpan.FromSeconds(3));
@@ -545,6 +617,7 @@ public partial class App : Application
         _viewModel?.Device.Stop();
         _showWindowWait?.Unregister(null);
         _showWindow?.Dispose();
+        _commandLine?.Dispose();
         _tray?.Dispose();
         _shortcuts?.Dispose();
         _services?.Dispose();

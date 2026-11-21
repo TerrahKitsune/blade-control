@@ -154,6 +154,28 @@ Blade Control is a portable app: nothing to install.
 The settings and the log live in `%LOCALAPPDATA%\BladeControl`. With Start at
 login on, Windows starts the exe from wherever it was last opened, in the tray.
 
+## Command line
+
+`BladeControl.exe` also takes a command, for scripts:
+
+| Command | Does |
+| --- | --- |
+| `--status` | The model, power source, mode, Custom's levels and max fan, fan speeds and the charge limit |
+| `--set-mode silent\|balanced\|performance\|custom` | Switches mode, as the mode shortcuts do |
+| `--set-charge-limit <60-100>` | Sets the charge limit; 100 charges without a limit |
+
+The command is passed to the running app, which does the work, so its window
+and saved profiles stay in step. If the app is not running, it is started in
+the tray first. The answer is one line of JSON, for example
+`{"ok":true,"message":"Active"}` after `--set-mode`, and the exit
+code is 0 when done, 1 when the app refused or could not do it, 2 for a
+malformed command and 3 when the app could not be reached.
+
+The exe is a windowed program, so the answer only shows when the output is
+redirected, as scripts do: `BladeControl.exe --status | more` in a command prompt.
+Likewise, a shell only sees the exit code when it waits for the exe: with
+`start /wait BladeControl.exe --status` in a command prompt, or when the output is piped.
+
 ## Requirements
 
 - Windows 10 or 11 on a Razer Blade.

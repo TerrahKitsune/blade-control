@@ -403,6 +403,28 @@ internal sealed partial class PerformanceViewModel : ObservableObject
             _ = ApplyChargeLimitAsync();
     }
 
+    /// <summary>
+    /// The command line's charge limit, set as the switch and slider would (100
+    /// turns the limit off), and how it went once the controller has it.
+    /// </summary>
+    public async Task<(bool Applied, string Status)> SetChargeLimitAsync(int limit)
+    {
+        await WaitUntilIdleAsync();
+
+        if (!HasChargeLimit)
+            return (false, L.T("Not supported on this laptop"));
+
+        _chargeLimitOn = limit < BatteryLimitRange.NoLimit;
+
+        if (_chargeLimitOn)
+            _chargeLimit = limit;
+
+        OnPropertyChanged(nameof(ChargeLimitOn));
+        OnPropertyChanged(nameof(ChargeLimit));
+
+        return await ApplyChargeLimitAsync();
+    }
+
     // ===== Startup, refresh and exit =====
 
     /// <summary>Applies the profile for the current power source: at startup.</summary>
@@ -507,6 +529,25 @@ internal sealed partial class PerformanceViewModel : ObservableObject
     /// </summary>
     /// <summary>The mode the laptop is in now, for the tray menu's check mark.</summary>
     public PerformanceMode? CurrentMode => _state.Mode;
+
+    /// <summary>What the laptop is in now, boost levels and max fan included, read from it: for the command line's status.</summary>
+    public async Task<PerformanceState> ReadCurrentStateAsync()
+    {
+        await WaitUntilIdleAsync();
+        await RefreshAsync();
+        return _state;
+    }
+
+    /// <summary>
+    /// The command line's mode: picked as a shortcut picks it, but from what the
+    /// laptop is in now, since the firmware may have changed it on its own.
+    /// </summary>
+    public async Task<(bool Applied, string Status)> SelectFromCommandLineAsync(PerformanceMode mode)
+    {
+        await WaitUntilIdleAsync();
+        await RefreshAsync();
+        return await SelectFromShortcutAsync(mode);
+    }
 
     /// <summary>Whether a mode can be picked now: this laptop has it, and the power source allows it (Custom only plugged in).</summary>
     public bool CanPick(PerformanceMode mode) =>
@@ -860,7 +901,7 @@ internal sealed partial class PerformanceViewModel : ObservableObject
     private void RefreshLater() =>
         System.Windows.Application.Current.Dispatcher.BeginInvoke(RefreshAll, DispatcherPriority.Background);
 
-    private async Task ApplyChargeLimitAsync(bool quiet = false)
+    private async Task<(bool Applied, string Status)> ApplyChargeLimitAsync(bool quiet = false)
     {
         var limit = _chargeLimitOn ? _chargeLimit : BatteryLimitRange.NoLimit;
 
@@ -869,17 +910,20 @@ internal sealed partial class PerformanceViewModel : ObservableObject
             await _services.ChargeLimit.SetChargeLimitAsync(limit);
             _services.UpdateSettings(settings => settings with { BatteryChargeLimit = limit });
 
+            var status = limit == BatteryLimitRange.NoLimit
+                ? L.T("The battery charges to 100% again.")
+                : L.F("The battery now stops charging at {0}%.", limit);
+
             if (!quiet)
-            {
-                _report(limit == BatteryLimitRange.NoLimit
-                    ? L.T("The battery charges to 100% again.")
-                    : L.F("The battery now stops charging at {0}%.", limit), false);
-            }
+                _report(status, false);
+
+            return (true, status);
         }
         catch (Exception exception)
         {
             AppLog.Error("Could not set the battery charge limit.", exception);
             _report(L.T("Could not set the battery charge limit."), true);
+            return (false, L.T("Could not set the battery charge limit."));
         }
     }
 }

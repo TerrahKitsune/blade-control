@@ -163,6 +163,30 @@ Los ajustes y el registro se guardan en `%LOCALAPPDATA%\BladeControl`. Con
 Iniciar con Windows activado, Windows abre el exe desde donde se abrió la
 última vez, en la bandeja.
 
+## Línea de comandos
+
+`BladeControl.exe` también acepta un comando, para scripts:
+
+| Comando | Hace |
+| --- | --- |
+| `--status` | El modelo, la fuente de energía, el modo, los niveles y los ventiladores al máximo de Personalizado, la velocidad de los ventiladores y el límite de carga |
+| `--set-mode silent\|balanced\|performance\|custom` | Cambia de modo, igual que los atajos de modo |
+| `--set-charge-limit <60-100>` | Pone el límite de carga; 100 carga sin límite |
+
+El comando se pasa a la app abierta, que hace el trabajo, así su ventana y sus
+perfiles guardados siguen al día. Si la app no está abierta, primero se abre en
+la bandeja. La respuesta es una línea de JSON, por ejemplo
+`{"ok":true,"message":"Activo"}` tras `--set-mode`, y el código
+de salida es 0 si se hizo, 1 si la app lo rechazó o no pudo hacerlo, 2 si el
+comando está mal escrito y 3 si no se pudo llegar a la app.
+
+El exe es un programa con ventana, así que la respuesta solo se ve cuando la
+salida se redirige, como hacen los scripts: `BladeControl.exe --status | more`
+en un símbolo del sistema.
+Del mismo modo, un shell solo ve el código de salida si espera al exe: con
+`start /wait BladeControl.exe --status` en un símbolo del sistema, o cuando la
+salida va por una tubería.
+
 ## Requisitos
 
 - Windows 10 u 11 en un Razer Blade.
